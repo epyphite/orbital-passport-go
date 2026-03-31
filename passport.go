@@ -1,6 +1,7 @@
 package passport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -44,15 +45,41 @@ func (u *User) HasRole(orgID, role string) bool {
 	return false
 }
 
+// CodeUser represents user info returned by the exchange code validation.
+// Maps to the POST /v1/auth/validate-code response.
+type CodeUser struct {
+	Valid               bool              `json:"valid"`
+	UserID              string            `json:"user_id"`
+	Email               string            `json:"email"`
+	Name                map[string]string `json:"name"`
+	AccountType         string            `json:"account_type"`
+	IsAdmin             bool              `json:"is_admin"`
+	KYCLevel            int               `json:"kyc_level"`
+	DefaultOrganization string            `json:"default_organization"`
+	Error               string            `json:"error,omitempty"`
+}
+
 // PassportClient validates sessions against OrbitalPassport.
 type PassportClient struct {
 	baseURL    string
+	apiKey     string
 	httpClient *http.Client
 }
 
+// NewPassportClient creates a client for session-based auth (cookie validation).
 func NewPassportClient(baseURL string) *PassportClient {
 	return &PassportClient{
 		baseURL:    baseURL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// NewPassportClientWithKey creates a client with a service API key for
+// server-to-server calls (validate-code, validate-token).
+func NewPassportClientWithKey(baseURL, apiKey string) *PassportClient {
+	return &PassportClient{
+		baseURL:    baseURL,
+		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -88,6 +115,50 @@ func (p *PassportClient) ValidateSession(ctx context.Context, cookieValue string
 	}
 
 	return &user, nil
+}
+
+// ValidateCode exchanges a one-time cross-domain SSO code for user info.
+// Used when a user logs in on Passport (different domain) and is redirected
+// back with ?code=xxx. The code is single-use and expires after 60 seconds.
+// Requires a service API key (use NewPassportClientWithKey).
+func (p *PassportClient) ValidateCode(ctx context.Context, code string) (*CodeUser, error) {
+	if p.apiKey == "" {
+		return nil, fmt.Errorf("API key required — use NewPassportClientWithKey")
+	}
+
+	body, err := json.Marshal(map[string]string{"code": code})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/auth/validate-code", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", p.apiKey)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("passport request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("passport returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result CodeUser
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode passport response: %w", err)
+	}
+
+	if !result.Valid {
+		return nil, fmt.Errorf("code validation failed: %s", result.Error)
+	}
+
+	return &result, nil
 }
 
 // LoginURL returns the Passport login URL with a return_to parameter.
