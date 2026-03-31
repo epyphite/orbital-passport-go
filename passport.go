@@ -61,16 +61,21 @@ type CodeUser struct {
 
 // PassportClient validates sessions against OrbitalPassport.
 type PassportClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	// apiURL is the Gateway API base (e.g., https://passport.orbitalpay.ai/api/gateway)
+	apiURL string
+	// passportURL is the Passport root for UI pages (e.g., https://passport.orbitalpay.ai)
+	passportURL string
+	apiKey      string
+	httpClient  *http.Client
 }
 
 // NewPassportClient creates a client for session-based auth (cookie validation).
+// baseURL is the Gateway API URL (e.g., https://passport.epy.digital/api/gateway).
 func NewPassportClient(baseURL string) *PassportClient {
 	return &PassportClient{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		apiURL:      baseURL,
+		passportURL: derivePassportURL(baseURL),
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -78,10 +83,21 @@ func NewPassportClient(baseURL string) *PassportClient {
 // server-to-server calls (validate-code, validate-token).
 func NewPassportClientWithKey(baseURL, apiKey string) *PassportClient {
 	return &PassportClient{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		apiURL:      baseURL,
+		passportURL: derivePassportURL(baseURL),
+		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// derivePassportURL strips /api/gateway from the base URL to get the root.
+func derivePassportURL(baseURL string) string {
+	for _, suffix := range []string{"/api/gateway", "/api/gateway/"} {
+		if len(baseURL) > len(suffix) && baseURL[len(baseURL)-len(suffix):] == suffix {
+			return baseURL[:len(baseURL)-len(suffix)]
+		}
+	}
+	return baseURL
 }
 
 const cookieName = "passport_session"
@@ -89,7 +105,7 @@ const cookieName = "passport_session"
 // ValidateSession checks the passport_session cookie against Passport's whoami endpoint.
 // Returns the authenticated user or an error.
 func (p *PassportClient) ValidateSession(ctx context.Context, cookieValue string) (*User, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/v1/auth/whoami", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiURL+"/v1/auth/whoami", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +147,7 @@ func (p *PassportClient) ValidateCode(ctx context.Context, code string) (*CodeUs
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/auth/validate-code", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.apiURL+"/v1/auth/validate-code", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +182,7 @@ func (p *PassportClient) ValidateCode(ctx context.Context, code string) (*CodeUs
 
 // LoginURL returns the Passport login URL with a return_to parameter.
 func (p *PassportClient) LoginURL(returnTo string) string {
-	return p.baseURL + "/login?return_to=" + url.QueryEscape(returnTo)
+	return p.passportURL + "/login?return_to=" + url.QueryEscape(returnTo)
 }
 
 var ErrUnauthorized = fmt.Errorf("unauthorized")
