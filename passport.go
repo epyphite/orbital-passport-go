@@ -145,6 +145,9 @@ func (p *PassportClient) ValidateCode(ctx context.Context, code string) (*CodeUs
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, ErrUnauthorized
+		}
 		respBody, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("passport returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
