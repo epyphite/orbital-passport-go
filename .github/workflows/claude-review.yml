@@ -1,0 +1,76 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD)
+          # Save diff to file to avoid shell escaping issues
+          echo "$DIFF" > /tmp/pr_diff.txt
+          echo "has_diff=true" >> "$GITHUB_OUTPUT"
+
+      - name: Claude Review
+        if: steps.diff.outputs.has_diff == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          DIFF=$(cat /tmp/pr_diff.txt)
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+
+          REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg diff "$DIFF" \
+              --arg title "$PR_TITLE" \
+              --arg body "$PR_BODY" \
+              '{
+                model: "claude-sonnet-4-5-20250514",
+                max_tokens: 4096,
+                messages: [{
+                  role: "user",
+                  content: ("You are a senior code reviewer. Review this pull request and provide constructive feedback.\n\n## PR Title: " + $title + "\n\n## PR Description:\n" + $body + "\n\n## Diff:\n```\n" + $diff + "\n```\n\nProvide a review with:\n1. **Summary** - Brief overview of changes\n2. **Issues** - Any bugs, security concerns, or logic errors (if none, say so)\n3. **Suggestions** - Improvements for code quality, performance, or readability\n4. **Verdict** - APPROVE, REQUEST_CHANGES, or COMMENT\n\nBe concise. Focus on what matters. Skip trivial style nits.")
+                }]
+              }')" \
+          )
+
+          # Extract the review text
+          REVIEW_TEXT=$(echo "$REVIEW" | jq -r '.content[0].text // "Review failed - check API key and quota"')
+
+          # Save for next step
+          echo "$REVIEW_TEXT" > /tmp/review.txt
+
+      - name: Post Review Comment
+        if: steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REVIEW_TEXT=$(cat /tmp/review.txt)
+
+          # Post as PR comment
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "## Claude Code Review
+
+          ${REVIEW_TEXT}
+
+          ---
+          *Automated review by Claude*"
